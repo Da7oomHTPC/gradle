@@ -27,7 +27,7 @@ class AsmBackedClassGeneratorInjectUndecoratedTest extends AbstractClassGenerato
 
     def "returns original class when class is not abstract and no service getter methods present"() {
         expect:
-        generator.generate(Bean) == Bean
+        generator.generate(Bean).generatedClass == Bean
     }
 
     def "can create instance of final class when a subclass is not required"() {

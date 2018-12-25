@@ -114,10 +114,11 @@ public class AsmBackedClassGenerator extends AbstractClassGenerator {
     }
 
     @Override
-    public <T> T newInstance(Constructor<T> constructor, ServiceRegistry services, Instantiator nested, Object[] params) throws InvocationTargetException, IllegalAccessException, InstantiationException {
+    protected <T> T newInstance(Constructor<T> constructor, ServiceRegistry services, Instantiator nested, Object[] params) throws InvocationTargetException, IllegalAccessException, InstantiationException {
         ObjectCreationDetails previous = SERVICES_FOR_NEXT_OBJECT.get();
         SERVICES_FOR_NEXT_OBJECT.set(new ObjectCreationDetails(nested, services));
         try {
+            constructor.setAccessible(true);
             return constructor.newInstance(params);
         } finally {
             SERVICES_FOR_NEXT_OBJECT.set(previous);

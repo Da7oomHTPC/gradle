@@ -29,8 +29,10 @@ import org.gradle.api.plugins.ExtensionAware;
 import org.gradle.api.provider.HasMultipleValues;
 import org.gradle.api.provider.MapProperty;
 import org.gradle.api.provider.Property;
+import org.gradle.internal.Cast;
 import org.gradle.internal.reflect.ClassDetails;
 import org.gradle.internal.reflect.ClassInspector;
+import org.gradle.internal.reflect.Instantiator;
 import org.gradle.internal.reflect.JavaReflectionUtil;
 import org.gradle.internal.reflect.MethodSet;
 import org.gradle.internal.reflect.PropertyAccessorType;
@@ -40,7 +42,9 @@ import org.gradle.internal.text.TreeFormatter;
 
 import javax.annotation.Nullable;
 import javax.inject.Inject;
+import java.lang.annotation.Annotation;
 import java.lang.reflect.Constructor;
+import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.lang.reflect.Type;
@@ -68,42 +72,43 @@ import java.util.concurrent.locks.ReentrantLock;
  * </ul>
  */
 public abstract class AbstractClassGenerator implements ClassGenerator {
-    private static final Map<Class<?>, Map<Class<?>, Class<?>>> GENERATED_CLASSES = new HashMap<Class<?>, Map<Class<?>, Class<?>>>();
+    private static final Map<Class<?>, Map<Class<?>, GeneratedClass<?>>> GENERATED_CLASSES = new HashMap<Class<?>, Map<Class<?>, GeneratedClass<?>>>();
     private static final Lock CACHE_LOCK = new ReentrantLock();
 
-    public <T> Class<? extends T> generate(Class<T> type) {
+    public <T> GeneratedClass<? extends T> generate(Class<T> type) {
         CACHE_LOCK.lock();
         try {
-            return generateUnderLock(type);
+            return Cast.uncheckedCast(generateUnderLock(type));
         } finally {
             CACHE_LOCK.unlock();
         }
     }
 
-    private <T> Class<? extends T> generateUnderLock(Class<T> type) {
-        Map<Class<?>, Class<?>> cache = GENERATED_CLASSES.get(getClass());
+    private GeneratedClass<?> generateUnderLock(Class<?> type) {
+        Map<Class<?>, GeneratedClass<?>> cache = GENERATED_CLASSES.get(getClass());
         if (cache == null) {
             // WeakHashMap won't work here. It keeps a strong reference to the mapping value, which is the generated class in this case
             // However, the generated class has a strong reference to the source class (by extending it), so the keys will always be
             // strongly reachable while this Class is strongly reachable. Use weak references for both key and value of the mapping instead.
-            cache = new ReferenceMap(AbstractReferenceMap.WEAK, AbstractReferenceMap.WEAK);
+            cache = new ReferenceMap(AbstractReferenceMap.WEAK, AbstractReferenceMap.HARD);
             GENERATED_CLASSES.put(getClass(), cache);
         }
-        Class<?> generatedClass = cache.get(type);
+        GeneratedClass<?> generatedClass = cache.get(type);
         if (generatedClass != null) {
-            return generatedClass.asSubclass(type);
+            return generatedClass;
         }
 
-        Class<?> subclass;
+        ServiceInjectionPropertyHandler injectionHandler = new ServiceInjectionPropertyHandler();
+        PropertyTypePropertyHandler propertyTypedHandler = new PropertyTypePropertyHandler();
+        ExtensibleTypePropertyHandler extensibleTypeHandler = new ExtensibleTypePropertyHandler();
+        DslMixInPropertyType dslMixInHandler = new DslMixInPropertyType(extensibleTypeHandler);
+        // Order is significant. Injection handler should be at the end
+        List<ClassGenerationHandler> handlers = ImmutableList.of(extensibleTypeHandler, dslMixInHandler, propertyTypedHandler, injectionHandler);
+
+        final Class<?> subclass;
         try {
             ClassInspectionVisitor inspectionVisitor = start(type);
 
-            ServiceInjectionPropertyHandler injectionHandler = new ServiceInjectionPropertyHandler();
-            PropertyTypePropertyHandler propertyTypedHandler = new PropertyTypePropertyHandler();
-            ExtensibleTypePropertyHandler extensibleTypeHandler = new ExtensibleTypePropertyHandler();
-            DslMixInPropertyType dslMixInHandler = new DslMixInPropertyType(extensibleTypeHandler);
-            // Order is significant. Injection handler should be at the end
-            List<ClassGenerationHandler> handlers = ImmutableList.of(extensibleTypeHandler, dslMixInHandler, propertyTypedHandler, injectionHandler);
             inspectType(type, handlers, extensibleTypeHandler);
             for (ClassGenerationHandler handler : handlers) {
                 handler.applyTo(inspectionVisitor);
@@ -132,12 +137,66 @@ public abstract class AbstractClassGenerator implements ClassGenerator {
             throw new ClassGenerationException(formatter.toString(), e);
         }
 
-        cache.put(type, subclass);
-        cache.put(subclass, subclass);
-        return subclass.asSubclass(type);
+        final List<Class<?>> injectedServices = injectionHandler.getInjectedServices();
+        GeneratedClass<Object> generated = new GeneratedClass<Object>() {
+            @Override
+            public Class<Object> getGeneratedClass() {
+                return Cast.uncheckedCast(subclass);
+            }
+
+            @Override
+            public List<GeneratedConstructor<Object>> getConstructors() {
+                ImmutableList.Builder<GeneratedConstructor<Object>> builder = ImmutableList.builderWithExpectedSize(subclass.getDeclaredConstructors().length);
+                for (final Constructor<?> constructor : subclass.getDeclaredConstructors()) {
+                    builder.add(new GeneratedConstructor<Object>() {
+                        @Override
+                        public Object newInstance(ServiceRegistry services, Instantiator nested, Object[] params) throws InvocationTargetException, IllegalAccessException, InstantiationException {
+                            return AbstractClassGenerator.this.newInstance(constructor, services, nested, params);
+                        }
+
+                        @Override
+                        public boolean requiresService(Class<?> serviceType) {
+                            for (Class<?> injectedService : injectedServices) {
+                                if (injectedService.isAssignableFrom(serviceType)) {
+                                    return true;
+                                }
+                            }
+                            return false;
+                        }
+
+                        @Override
+                        public Class<?>[] getParameterTypes() {
+                            return constructor.getParameterTypes();
+                        }
+
+                        @Override
+                        public Type[] getGenericParameterTypes() {
+                            return constructor.getGenericParameterTypes();
+                        }
+
+                        @Nullable
+                        @Override
+                        public <S extends Annotation> S getAnnotation(Class<S> annotation) {
+                            return constructor.getAnnotation(annotation);
+                        }
+
+                        @Override
+                        public int getModifiers() {
+                            return constructor.getModifiers();
+                        }
+                    });
+                }
+                return builder.build();
+            }
+        };
+        cache.put(type, generated);
+        cache.put(subclass, generated);
+        return generated;
     }
 
     protected abstract ClassInspectionVisitor start(Class<?> type);
+
+    protected abstract <T> T newInstance(Constructor<T> constructor, ServiceRegistry services, Instantiator nested, Object[] params) throws InvocationTargetException, IllegalAccessException, InstantiationException;
 
     private void inspectType(Class<?> type, List<ClassGenerationHandler> propertyHandlers, UnclaimedPropertyHandler unclaimedHandler) {
         ClassDetails classDetails = ClassInspector.inspect(type);
@@ -682,6 +741,14 @@ public abstract class AbstractClassGenerator implements ClassGenerator {
 
         public boolean isShouldImplementWithServicesRegistry() {
             return !serviceInjectionProperties.isEmpty() && !hasServicesProperty;
+        }
+
+        public List<Class<?>> getInjectedServices() {
+            ImmutableList.Builder<Class<?>> services = ImmutableList.builderWithExpectedSize(serviceInjectionProperties.size());
+            for (PropertyMetaData property : serviceInjectionProperties) {
+                services.add(property.getType());
+            }
+            return services.build();
         }
     }
 

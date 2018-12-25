@@ -30,7 +30,6 @@ abstract class AbstractClassGeneratorSpec extends Specification {
 
     protected <T> T create(Class<T> clazz, ServiceRegistry services, Object... args) {
         def type = generator.generate(clazz)
-        return generator.newInstance(type.constructors[0], services, Stub(Instantiator), args)
+        return type.constructors[0].newInstance(services, Stub(Instantiator), args)
     }
-
 }
