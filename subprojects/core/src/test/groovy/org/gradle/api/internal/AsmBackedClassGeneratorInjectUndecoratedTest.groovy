@@ -22,6 +22,8 @@ import org.gradle.internal.service.ServiceRegistry
 
 import javax.inject.Inject
 
+import static org.gradle.api.internal.AsmBackedClassGeneratorTest.*
+
 class AsmBackedClassGeneratorInjectUndecoratedTest extends AbstractClassGeneratorSpec {
     final ClassGenerator generator = AsmBackedClassGenerator.injectOnly()
 
@@ -42,7 +44,7 @@ class AsmBackedClassGeneratorInjectUndecoratedTest extends AbstractClassGenerato
 
     def "generates subclass that is not decorated when class is abstract"() {
         expect:
-        def bean = create(AsmBackedClassGeneratorTest.AbstractBean, "a")
+        def bean = create(AbstractBean, "a")
         bean.a == "a"
 
         bean instanceof GeneratedSubclass
@@ -58,7 +60,8 @@ class AsmBackedClassGeneratorInjectUndecoratedTest extends AbstractClassGenerato
         services.get(Number) >> 12
 
         expect:
-        def bean = create(AsmBackedClassGeneratorTest.BeanWithServiceGetters, services)
+        // Use a Java class to verify GroovyObject is not mixed in
+        def bean = create(BeanWithServiceGetters, services)
         bean.someValue == 12
         bean.calculated == "[12]"
 
@@ -68,6 +71,18 @@ class AsmBackedClassGeneratorInjectUndecoratedTest extends AbstractClassGenerato
         !(bean instanceof HasConvention)
         !(bean instanceof IConventionAware)
         !(bean instanceof GroovyObject)
+    }
+
+    def "can create decorated and undecorated subclasses of same class"() {
+        def services = Stub(ServiceRegistry)
+        services.get(Number) >> 12
+
+        expect:
+        def decorated = create(AsmBackedClassGenerator.decorateAndInject(), BeanWithServiceGetters)
+        def undecorated = create(AsmBackedClassGenerator.injectOnly(), BeanWithServiceGetters)
+        decorated.class != undecorated.class
+        decorated instanceof ExtensionAware
+        !(undecorated instanceof ExtensionAware)
     }
 
     static class Bean {

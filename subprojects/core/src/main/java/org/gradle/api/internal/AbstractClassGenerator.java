@@ -21,8 +21,6 @@ import com.google.common.collect.LinkedHashMultimap;
 import com.google.common.collect.SetMultimap;
 import groovy.lang.Closure;
 import groovy.lang.GroovyObject;
-import org.apache.commons.collections.map.AbstractReferenceMap;
-import org.apache.commons.collections.map.ReferenceMap;
 import org.gradle.api.Action;
 import org.gradle.api.NonExtensible;
 import org.gradle.api.plugins.ExtensionAware;
@@ -43,6 +41,8 @@ import org.gradle.internal.text.TreeFormatter;
 import javax.annotation.Nullable;
 import javax.inject.Inject;
 import java.lang.annotation.Annotation;
+import java.lang.ref.SoftReference;
+import java.lang.ref.WeakReference;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
@@ -54,6 +54,7 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.WeakHashMap;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 
@@ -72,7 +73,7 @@ import java.util.concurrent.locks.ReentrantLock;
  * </ul>
  */
 public abstract class AbstractClassGenerator implements ClassGenerator {
-    private static final Map<Class<?>, Map<Class<?>, GeneratedClass<?>>> GENERATED_CLASSES = new HashMap<Class<?>, Map<Class<?>, GeneratedClass<?>>>();
+    private static final Map<Class<?>, Map<Class<?>, CachedClass>> GENERATED_CLASSES = new HashMap<Class<?>, Map<Class<?>, CachedClass>>();
     private static final Lock CACHE_LOCK = new ReentrantLock();
 
     public <T> GeneratedClass<? extends T> generate(Class<T> type) {
@@ -85,17 +86,19 @@ public abstract class AbstractClassGenerator implements ClassGenerator {
     }
 
     private GeneratedClass<?> generateUnderLock(Class<?> type) {
-        Map<Class<?>, GeneratedClass<?>> cache = GENERATED_CLASSES.get(getClass());
+        Map<Class<?>, CachedClass> cache = GENERATED_CLASSES.get(getClass());
         if (cache == null) {
-            // WeakHashMap won't work here. It keeps a strong reference to the mapping value, which is the generated class in this case
-            // However, the generated class has a strong reference to the source class (by extending it), so the keys will always be
-            // strongly reachable while this Class is strongly reachable. Use weak references for both key and value of the mapping instead.
-            cache = new ReferenceMap(AbstractReferenceMap.WEAK, AbstractReferenceMap.HARD);
+            // Use weak keys to allow the type to be garbage collected. The entries maintain only weak and soft references to the type and the generated class
+            cache = new WeakHashMap<Class<?>, CachedClass>();
             GENERATED_CLASSES.put(getClass(), cache);
         }
-        GeneratedClass<?> generatedClass = cache.get(type);
+        CachedClass generatedClass = cache.get(type);
         if (generatedClass != null) {
-            return generatedClass;
+            GeneratedClass<?> wrapper = generatedClass.asWrapper();
+            if (wrapper != null) {
+                return wrapper;
+            }
+            // Else, the generated class has been collected, so generate a new one
         }
 
         ServiceInjectionPropertyHandler injectionHandler = new ServiceInjectionPropertyHandler();
@@ -137,65 +140,11 @@ public abstract class AbstractClassGenerator implements ClassGenerator {
             throw new ClassGenerationException(formatter.toString(), e);
         }
 
-        final List<Class<?>> injectedServices = injectionHandler.getInjectedServices();
-        GeneratedClass<Object> generated = new GeneratedClass<Object>() {
-            @Override
-            public Class<Object> getGeneratedClass() {
-                return Cast.uncheckedCast(subclass);
-            }
-
-            @Override
-            public List<GeneratedConstructor<Object>> getConstructors() {
-                ImmutableList.Builder<GeneratedConstructor<Object>> builder = ImmutableList.builderWithExpectedSize(subclass.getDeclaredConstructors().length);
-                for (final Constructor<?> constructor : subclass.getDeclaredConstructors()) {
-                    builder.add(new GeneratedConstructor<Object>() {
-                        @Override
-                        public Object newInstance(ServiceRegistry services, Instantiator nested, Object[] params) throws InvocationTargetException, IllegalAccessException, InstantiationException {
-                            return AbstractClassGenerator.this.newInstance(constructor, services, nested, params);
-                        }
-
-                        @Override
-                        public boolean requiresService(Class<?> serviceType) {
-                            for (Class<?> parameterType : constructor.getParameterTypes()) {
-                                if (parameterType.isAssignableFrom(serviceType)) {
-                                    return true;
-                                }
-                            }
-                            for (Class<?> injectedService : injectedServices) {
-                                if (injectedService.isAssignableFrom(serviceType)) {
-                                    return true;
-                                }
-                            }
-                            return false;
-                        }
-
-                        @Override
-                        public Class<?>[] getParameterTypes() {
-                            return constructor.getParameterTypes();
-                        }
-
-                        @Override
-                        public Type[] getGenericParameterTypes() {
-                            return constructor.getGenericParameterTypes();
-                        }
-
-                        @Nullable
-                        @Override
-                        public <S extends Annotation> S getAnnotation(Class<S> annotation) {
-                            return constructor.getAnnotation(annotation);
-                        }
-
-                        @Override
-                        public int getModifiers() {
-                            return constructor.getModifiers();
-                        }
-                    });
-                }
-                return builder.build();
-            }
-        };
-        cache.put(type, generated);
-        cache.put(subclass, generated);
+        List<Class<?>> injectedServices = injectionHandler.getInjectedServices();
+        GeneratedClassImpl generated = new GeneratedClassImpl(subclass, injectedServices);
+        CachedClass cachedClass = new CachedClass(generated);
+        cache.put(type, cachedClass);
+        cache.put(subclass, cachedClass);
         return generated;
     }
 
@@ -290,6 +239,113 @@ public abstract class AbstractClassGenerator implements ClassGenerator {
             throw new IllegalArgumentException(formatter.toString());
         }
         // Else, ignore abstract methods on non-abstract classes as some other tooling (e.g. the Groovy compiler) has decided this is ok
+    }
+
+    private class GeneratedClassImpl implements GeneratedClass<Object> {
+        private final Class<?> generatedClass;
+        private final List<Class<?>> injectedServices;
+        private final List<GeneratedConstructor<Object>> constructors;
+
+        public GeneratedClassImpl(Class<?> generatedClass, List<Class<?>> injectedServices) {
+            this.generatedClass = generatedClass;
+            this.injectedServices = injectedServices;
+            ImmutableList.Builder<GeneratedConstructor<Object>> builder = ImmutableList.builderWithExpectedSize(generatedClass.getDeclaredConstructors().length);
+            for (final Constructor<?> constructor : generatedClass.getDeclaredConstructors()) {
+                builder.add(new GeneratedConstructorImpl(constructor));
+            }
+            this.constructors = builder.build();
+        }
+
+        @Override
+        public Class<Object> getGeneratedClass() {
+            return Cast.uncheckedCast(generatedClass);
+        }
+
+        @Override
+        public List<GeneratedConstructor<Object>> getConstructors() {
+            return constructors;
+        }
+
+        private class GeneratedConstructorImpl implements GeneratedConstructor<Object> {
+            private final Constructor<?> constructor;
+
+            public GeneratedConstructorImpl(Constructor<?> constructor) {
+                this.constructor = constructor;
+            }
+
+            @Override
+            public Object newInstance(ServiceRegistry services, Instantiator nested, Object[] params) throws InvocationTargetException, IllegalAccessException, InstantiationException {
+                return AbstractClassGenerator.this.newInstance(constructor, services, nested, params);
+            }
+
+            @Override
+            public boolean requiresService(Class<?> serviceType) {
+                for (Class<?> parameterType : constructor.getParameterTypes()) {
+                    if (parameterType.isAssignableFrom(serviceType)) {
+                        return true;
+                    }
+                }
+                for (Class<?> injectedService : injectedServices) {
+                    if (injectedService.isAssignableFrom(serviceType)) {
+                        return true;
+                    }
+                }
+                return false;
+            }
+
+            @Override
+            public Class<?>[] getParameterTypes() {
+                return constructor.getParameterTypes();
+            }
+
+            @Override
+            public Type[] getGenericParameterTypes() {
+                return constructor.getGenericParameterTypes();
+            }
+
+            @Nullable
+            @Override
+            public <S extends Annotation> S getAnnotation(Class<S> annotation) {
+                return constructor.getAnnotation(annotation);
+            }
+
+            @Override
+            public int getModifiers() {
+                return constructor.getModifiers();
+            }
+        }
+    }
+
+    private class CachedClass {
+        // Keep a weak reference to the generated class, to allow it to be collected
+        private final WeakReference<Class<?>> generatedClass;
+        // The GeneratedClass wrapper holds strong references to the generated class and its constructors, so keep in a soft reference to allow
+        // it to be reused (potentially) without preventing collection of the generated class
+        private SoftReference<GeneratedClassImpl> wrapper;
+        // This should be a list of weak references. For now, assume that all services are Gradle core services and are never collected
+        private final List<Class<?>> injectedServices;
+
+        CachedClass(GeneratedClassImpl generatedClass) {
+            this.generatedClass = new WeakReference<Class<?>>(generatedClass.generatedClass);
+            this.wrapper = new SoftReference<GeneratedClassImpl>(generatedClass);
+            this.injectedServices = generatedClass.injectedServices;
+        }
+
+        @Nullable
+        public GeneratedClassImpl asWrapper() {
+            GeneratedClassImpl wrapper = this.wrapper.get();
+            if (wrapper != null) {
+                return wrapper;
+            }
+            // Hold a strong reference to the class, to avoid it being collected while doing this work
+            Class<?> generatedClass = this.generatedClass.get();
+            if (generatedClass == null) {
+                return null;
+            }
+            wrapper = new GeneratedClassImpl(generatedClass, injectedServices);
+            this.wrapper = new SoftReference<GeneratedClassImpl>(wrapper);
+            return wrapper;
+        }
     }
 
     private static class ClassMetaData {
