@@ -75,6 +75,53 @@ class DependencyInjectionUsingClassGeneratorBackedInstantiatorTest extends Speci
         result.param2 == 12
     }
 
+    def "can use factory to create instance with injected service and parameter"() {
+        given:
+        def services = Stub(ServiceRegistry)
+        _ * services.find(String) >> "string"
+
+        when:
+        def factory = instantiator.factoryFor(HasInjectConstructor)
+        def result = factory.newInstance(services, 12)
+
+        then:
+        result.param1 == "string"
+        result.param2 == 12
+    }
+
+    def "can use factory to create instance with injected service using getter"() {
+        given:
+        def services = Stub(ServiceRegistry)
+        _ * services.get(String) >> "string"
+
+        when:
+        def factory = instantiator.factoryFor(HasGetterInjection)
+        def result = factory.newInstance(services)
+
+        then:
+        result.someService == "string"
+    }
+
+    def "can query whether service is required when declared as constructor parameter"() {
+        when:
+        def factory = instantiator.factoryFor(HasInjectConstructor)
+
+        then:
+        factory.requiresService(String)
+        factory.requiresService(Number)
+        !factory.requiresService(Runnable)
+    }
+
+    def "can query whether service is required when declared as getter"() {
+        when:
+        def factory = instantiator.factoryFor(HasGetterInjection)
+
+        then:
+        factory.requiresService(String)
+        !factory.requiresService(Number)
+        !factory.requiresService(Runnable)
+    }
+
     static class HasGetterInjection {
         @Inject String getSomeService() { throw new UnsupportedOperationException() }
     }

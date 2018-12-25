@@ -44,7 +44,7 @@ public class DependencyInjectingInstantiator implements Instantiator {
     public <T> T newInstance(Class<? extends T> type, Object... parameters) {
         try {
             ClassGenerator.GeneratedConstructor<? extends T> constructor = constructorSelector.forParams(type, parameters);
-            Object[] resolvedParameters = convertParameters(type, constructor, parameters);
+            Object[] resolvedParameters = convertParameters(type, constructor, services, parameters);
             try {
                 return constructor.newInstance(services, this, resolvedParameters);
             } catch (InvocationTargetException e) {
@@ -66,7 +66,7 @@ public class DependencyInjectingInstantiator implements Instantiator {
             @Override
             public T newInstance(ServiceRegistry services, Object... parameters) {
                 try {
-                    Object[] resolvedParameters = convertParameters(type, constructor, parameters);
+                    Object[] resolvedParameters = convertParameters(type, constructor, services, parameters);
                     try {
                         return constructor.newInstance(services, DependencyInjectingInstantiator.this, resolvedParameters);
                     } catch (InvocationTargetException e) {
@@ -84,7 +84,7 @@ public class DependencyInjectingInstantiator implements Instantiator {
         };
     }
 
-    private Object[] convertParameters(Class<?> type, ClassGenerator.GeneratedConstructor<?> constructor, Object[] parameters) {
+    private Object[] convertParameters(Class<?> type, ClassGenerator.GeneratedConstructor<?> constructor, ServiceRegistry services, Object[] parameters) {
         constructorSelector.vetoParameters(constructor, parameters);
         Class<?>[] parameterTypes = constructor.getParameterTypes();
         if (parameterTypes.length < parameters.length) {
@@ -98,7 +98,7 @@ public class DependencyInjectingInstantiator implements Instantiator {
             // No services to be mixed in
             return verifyParameters(constructor, parameters);
         } else {
-            return addServicesToParameters(type, constructor, parameters);
+            return addServicesToParameters(type, constructor, services, parameters);
         }
     }
 
@@ -135,7 +135,7 @@ public class DependencyInjectingInstantiator implements Instantiator {
         throw new IllegalArgumentException(formatter.toString());
     }
 
-    private Object[] addServicesToParameters(Class<?> type, ClassGenerator.GeneratedConstructor<?> constructor, Object[] parameters) {
+    private Object[] addServicesToParameters(Class<?> type, ClassGenerator.GeneratedConstructor<?> constructor, ServiceRegistry services, Object[] parameters) {
         Class<?>[] parameterTypes = constructor.getParameterTypes();
         Type[] genericTypes = constructor.getGenericParameterTypes();
         Object[] resolvedParameters = new Object[parameterTypes.length];

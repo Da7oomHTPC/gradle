@@ -156,6 +156,11 @@ public abstract class AbstractClassGenerator implements ClassGenerator {
 
                         @Override
                         public boolean requiresService(Class<?> serviceType) {
+                            for (Class<?> parameterType : constructor.getParameterTypes()) {
+                                if (parameterType.isAssignableFrom(serviceType)) {
+                                    return true;
+                                }
+                            }
                             for (Class<?> injectedService : injectedServices) {
                                 if (injectedService.isAssignableFrom(serviceType)) {
                                     return true;
