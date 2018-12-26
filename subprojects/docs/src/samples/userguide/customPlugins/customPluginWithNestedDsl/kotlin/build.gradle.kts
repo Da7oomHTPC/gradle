@@ -16,8 +16,8 @@ open class GreetingPluginExtension(val greeter: Person) {
 
 class GreetingPlugin : Plugin<Project> {
     override fun apply(project: Project) {
-        // Create the extension, passing in an ObjectFactory for it to use
-        val extension = project.extensions.create<GreetingPluginExtension>("greeting", project.objects)
+        // Create the 'greeting' extension
+        val extension = project.extensions.create<GreetingPluginExtension>("greeting")
         project.task("hello") {
             doLast {
                 println("${extension.message} from ${extension.greeter.name}")
