@@ -2,12 +2,9 @@ open class Person {
     var name: String? = null
 }
 
-open class GreetingPluginExtension(val greeter: Person) {
+open class GreetingPluginExtension @javax.inject.Inject constructor(objectFactory: ObjectFactory) {
     var message: String? = null
-
-    // Create a Person instance
-    @javax.inject.Inject
-    constructor(objectFactory: ObjectFactory): this(objectFactory.newInstance<Person>())
+    val greeter: Person = objectFactory.newInstance()
 
     fun greeter(action: Action<in Person>) {
         action.execute(greeter)
